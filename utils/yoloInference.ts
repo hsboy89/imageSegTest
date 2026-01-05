@@ -66,26 +66,26 @@ export function processYOLOOutput(
 
   const detections: YOLODetection[] = [];
 
-  // 스케일 팩터
-  const scaleX = originalWidth / inputSize;
-  const scaleY = originalHeight / inputSize;
-
   // 박스 처리
   for (let i = 0; i < numBoxes; i++) {
-    let offset: number;
-    if (isTransposed) {
-      // [1, 8400, 116] 형식: offset = i * 116
-      offset = i * boxSize;
-    } else {
-      // [1, 116, 8400] 형식: offset = i * 116 (기존 방식)
-      offset = i * boxSize;
-    }
+    let x: number, y: number, w: number, h: number;
+    let offset: number = 0;
     
-    // 바운딩 박스 (YOLOv8-seg는 입력 크기 기준 좌표 사용)
-    const x = detectionsData[offset];
-    const y = detectionsData[offset + 1];
-    const w = detectionsData[offset + 2];
-    const h = detectionsData[offset + 3];
+    if (isTransposed) {
+      // [1, 8400, 116] 형식: 각 박스가 연속적으로 나열됨
+      offset = i * boxSize;
+      x = detectionsData[offset];
+      y = detectionsData[offset + 1];
+      w = detectionsData[offset + 2];
+      h = detectionsData[offset + 3];
+    } else {
+      // [1, 116, 8400] 형식: 각 feature가 8400개 박스에 대해 나열됨
+      // x는 detectionsData[0 * 8400 + i], y는 detectionsData[1 * 8400 + i], ...
+      x = detectionsData[0 * numBoxes + i];
+      y = detectionsData[1 * numBoxes + i];
+      w = detectionsData[2 * numBoxes + i];
+      h = detectionsData[3 * numBoxes + i];
+    }
 
     // 바운딩 박스 유효성 검사
     // w, h는 양수여야 함
@@ -95,7 +95,12 @@ export function processYOLOOutput(
     let maxConf = 0;
     let classId = 0;
     for (let j = 0; j < 80; j++) {
-      const rawLogit = detectionsData[offset + 4 + j];
+      let rawLogit: number;
+      if (isTransposed) {
+        rawLogit = detectionsData[offset + 4 + j];
+      } else {
+        rawLogit = detectionsData[(4 + j) * numBoxes + i];
+      }
       // Sigmoid 적용하여 확률로 변환
       const conf = 1 / (1 + Math.exp(-rawLogit));
       if (conf > maxConf) {
@@ -113,32 +118,42 @@ export function processYOLOOutput(
     if (maxConf < confThreshold) continue;
 
     // 바운딩 박스를 원본 이미지 크기로 변환
-    // YOLOv8-seg는 입력 크기(640) 기준 좌표를 사용하므로 스케일링 필요
+    // YOLOv8-seg는 입력 크기(640) 기준 좌표를 사용 (center_x, center_y, width, height)
+    // 좌표가 이미 픽셀 단위인지 정규화된 값인지 확인 필요
+    // 일반적으로 ONNX 모델은 정규화된 좌표(0-1)를 사용하거나 픽셀 좌표를 사용할 수 있음
+    // 여기서는 픽셀 좌표라고 가정하고 스케일링
+    const scaleX = originalWidth / inputSize;
+    const scaleY = originalHeight / inputSize;
+    
     const bbox: [number, number, number, number] = [
-      (x / inputSize) * originalWidth,
-      (y / inputSize) * originalHeight,
-      (w / inputSize) * originalWidth,
-      (h / inputSize) * originalHeight,
+      x * scaleX,  // center_x
+      y * scaleY,  // center_y
+      w * scaleX,  // width
+      h * scaleY,  // height
     ];
 
     // 너무 작은 바운딩 박스 필터링 (최소 크기: 10x10 픽셀)
     if (bbox[2] < 10 || bbox[3] < 10) continue;
 
-    // 이미지 범위를 벗어나는 바운딩 박스 필터링
+    // 이미지 범위를 벗어나는 바운딩 박스 필터링 (완전히 이미지 밖에 있는 경우만 제거)
     const bboxXMin = bbox[0] - bbox[2] / 2;
     const bboxYMin = bbox[1] - bbox[3] / 2;
     const bboxXMax = bbox[0] + bbox[2] / 2;
     const bboxYMax = bbox[1] + bbox[3] / 2;
     
-    if (bboxXMin < -bbox[2] || bboxYMin < -bbox[3] || 
-        bboxXMax > originalWidth + bbox[2] || bboxYMax > originalHeight + bbox[3]) {
+    // 완전히 이미지 밖에 있는 경우만 필터링 (일부라도 겹치면 허용)
+    if (bboxXMax < 0 || bboxYMax < 0 || bboxXMin > originalWidth || bboxYMin > originalHeight) {
       continue;
     }
 
     // 마스크 계수 추출 (32개)
     const maskCoeffs = new Float32Array(32);
     for (let j = 0; j < 32; j++) {
-      maskCoeffs[j] = detectionsData[offset + 84 + j];
+      if (isTransposed) {
+        maskCoeffs[j] = detectionsData[offset + 84 + j];
+      } else {
+        maskCoeffs[j] = detectionsData[(84 + j) * numBoxes + i];
+      }
     }
 
     detections.push({
@@ -258,12 +273,17 @@ export function generateMask(
   const mask = new Float32Array(maskSize * maskSize);
 
   // 프로토타입 마스크와 계수 결합
+  // protoMasks는 [1, 32, 160, 160] 형식이므로 인덱싱: [i * 160 * 160 + y * 160 + x]
   for (let y = 0; y < maskSize; y++) {
     for (let x = 0; x < maskSize; x++) {
       let sum = 0;
       for (let i = 0; i < 32; i++) {
+        // [1, 32, 160, 160] 형식: batch=0이므로 첫 번째 차원은 무시
+        // 인덱스: i * (160 * 160) + y * 160 + x
         const idx = i * maskSize * maskSize + y * maskSize + x;
-        sum += maskCoeffs[i] * protoMasks[idx];
+        if (idx < protoMasks.length) {
+          sum += maskCoeffs[i] * protoMasks[idx];
+        }
       }
       mask[y * maskSize + x] = sum;
     }

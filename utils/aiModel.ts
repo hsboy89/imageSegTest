@@ -189,13 +189,13 @@ export async function runInference(
         const { processYOLOOutput, generateMask, getClassName } = await import('./yoloInference');
         
         console.log('YOLO 후처리 시작...');
-        // confidence threshold를 높여서 false positive 줄이기 (0.9로 설정)
+        // confidence threshold를 적절히 설정 (0.5-0.7 권장)
         const yoloResult = processYOLOOutput(
           outputValues,
           originalWidth,
           originalHeight,
           modelConfig.inputSize[0],
-          0.9  // confidence threshold를 0.9로 설정
+          0.5  // confidence threshold를 0.5로 설정 (더 많은 객체 감지)
         );
         console.log('YOLO 후처리 완료. 감지된 객체:', yoloResult.detections.length);
         
