@@ -91,11 +91,6 @@ export function processYOLOOutput(
     // w, h는 양수여야 함
     if (w <= 0 || h <= 0) continue;
     
-    // 디버깅: 처음 몇 개 박스의 좌표 확인
-    if (i < 5) {
-      console.log(`박스 ${i}: x=${x.toFixed(2)}, y=${y.toFixed(2)}, w=${w.toFixed(2)}, h=${h.toFixed(2)}`);
-    }
-
     // 클래스 확률 찾기 (YOLOv8-seg는 raw logits이므로 sigmoid 적용 필요)
     let maxConf = 0;
     let classId = 0;
@@ -107,6 +102,11 @@ export function processYOLOOutput(
         maxConf = conf;
         classId = j;
       }
+    }
+
+    // 디버깅: 처음 몇 개 박스의 좌표와 confidence 확인
+    if (i < 10) {
+      console.log(`박스 ${i}: x=${x.toFixed(2)}, y=${y.toFixed(2)}, w=${w.toFixed(2)}, h=${h.toFixed(2)}, maxConf=${maxConf.toFixed(4)}, classId=${classId} (${getClassName(classId)})`);
     }
 
     // confidence threshold 필터링
